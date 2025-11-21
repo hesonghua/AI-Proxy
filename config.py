@@ -50,6 +50,8 @@ class Config:
         self.providers: List[Provider] = []
         self.valid_tokens: Dict[str, str] = {}
         self.supported_models: List[str] = []
+        self.host: str = "localhost"
+        self.port: int = 8080
         logger.info(f"初始化配置管理器，配置文件: {config_file}")
         self.load_config()
     
@@ -63,6 +65,9 @@ class Config:
             with open(self.config_file, 'r', encoding='utf-8') as f:
                 config_data = json.load(f)
             
+            self.host = config_data.get('host', 'localhost')
+            self.port = config_data.get('port', 8080)
+
             # 加载供应商配置
             self.providers = []
             providers_data = config_data.get('providers', [])

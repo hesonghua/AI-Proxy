@@ -15,5 +15,7 @@
     ".*4.*5.*sonnet",
     "gpt-?5",
     "gemini.*3"
-  ]
+  ],
+  "host" : "localhost",
+  "port" : 8001
 }
