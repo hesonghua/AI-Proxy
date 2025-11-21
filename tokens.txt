@@ -1,7 +1,0 @@
-# API Token白名单
-# 每行一个token，用于API访问验证
-# 格式：token描述|token值
-
-# 示例tokens（请根据需要添加实际token）
-test_token|sk-test-123456
-admin_token|sk-admin-789012

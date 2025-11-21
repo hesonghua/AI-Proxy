@@ -1,5 +1,6 @@
 """API兼容层 - FastAPI应用"""
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -14,6 +15,24 @@ from client import ModelManager
 
 # 获取logger
 logger = logging.getLogger(__name__)
+
+# 全局配置和模型管理器
+config = Config()
+model_manager = ModelManager(config.providers, config)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时的初始化
+    logger.info("AI聚合代理服务启动中...")
+    logger.info(f"已加载 {len(config.providers)} 个供应商配置")
+    
+    yield
+    
+    # 关闭时的清理
+    logger.info("正在关闭AI聚合代理服务...")
+    await model_manager.close_all()
 
 # 创建安全方案
 security = HTTPBearer(auto_error=False)
@@ -60,12 +79,9 @@ class ModelsResponse(BaseModel):
 app = FastAPI(
     title="AI聚合代理",
     description="兼容OpenAI API的AI模型聚合代理服务",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan  # 使用现代化的生命周期管理
 )
-
-# 全局配置和模型管理器
-config = Config()
-model_manager = ModelManager(config.providers)
 
 
 def normalize_message_content(content):
@@ -89,20 +105,6 @@ def normalize_message_content(content):
                 return str(content)
     else:
         return str(content)
-
-
-@app.on_event("startup")
-async def startup_event():
-    """应用启动时的初始化"""
-    logger.info("AI聚合代理服务启动中...")
-    logger.info(f"已加载 {len(config.providers)} 个供应商配置")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """应用关闭时的清理"""
-    logger.info("正在关闭AI聚合代理服务...")
-    await model_manager.close_all()
 
 
 @app.get("/health")
@@ -233,7 +235,7 @@ async def reload_config():
         config.reload()
         
         # 重新创建模型管理器
-        model_manager = ModelManager(config.providers)
+        model_manager = ModelManager(config.providers, config)
         
         # 清除模型缓存
         model_manager.clear_cache()

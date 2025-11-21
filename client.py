@@ -148,10 +148,11 @@ class ProviderClient:
 class ModelManager:
     """模型管理器"""
     
-    def __init__(self, providers: List[Provider]):
+    def __init__(self, providers: List[Provider], config=None):
         self.providers = providers
         self.clients = {p.name: ProviderClient(p) for p in providers}
         self._models_cache: Optional[List[Dict[str, Any]]] = None
+        self.config = config
         logger.info(f"初始化模型管理器，供应商数量: {len(providers)}")
     
     async def get_all_models(self) -> List[Dict[str, Any]]:
@@ -176,6 +177,10 @@ class ModelManager:
                 logger.debug(f"供应商 {list(self.clients.keys())[i]} 返回 {len(result)} 个模型")
             else:
                 logger.warning(f"供应商 {list(self.clients.keys())[i]} 获取模型失败: {result}")
+        
+        # 如果有config，则过滤模型列表
+        if self.config:
+            all_models = self.config.filter_models(all_models)
         
         self._models_cache = all_models
         logger.info(f"成功获取 {len(all_models)} 个模型")

@@ -1,0 +1,19 @@
+{
+  "providers": [
+    "zhipu|https://open.bigmodel.cn/api/coding/paas/v4|your_key",
+    "dmxapi|https://www.dmxapi.cn/v1|your_key",
+    "aliyun|https://dashscope.aliyuncs.com/compatible-mode/v1|your_key"
+  ],
+  "tokens": [
+    "token1|xxxxxxxxxxx"
+  ],
+  "supported_models": [
+    "deepseek.*3.*2",
+    "qwen.*max",
+    "glm-4.6",
+    "sonnet.*4.*[\\.-]5",
+    ".*4.*5.*sonnet",
+    "gpt-?5",
+    "gemini.*3"
+  ]
+}
