@@ -197,8 +197,27 @@ async def create_chat_completion(request: ChatCompletionRequest,
         # 处理流式响应
         if request.stream and "stream_response" in result:
             logger.info("返回流式响应")
+            
+            async def stream_wrapper():
+                """包装流式响应，确保正确传递SSE格式的数据"""
+                try:
+                    async for chunk in result["stream_response"]:
+                        # 直接传递从供应商返回的SSE格式数据
+                        yield chunk
+                except Exception as e:
+                    logger.error(f"流式响应处理错误: {str(e)}")
+                    # 发送错误事件
+                    error_data = {
+                        "error": {
+                            "message": f"流式响应错误: {str(e)}",
+                            "type": "stream_error",
+                            "code": "stream_error"
+                        }
+                    }
+                    yield f"data: {json.dumps(error_data)}\n\n"
+            
             return StreamingResponse(
-                result["stream_response"],
+                stream_wrapper(),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",

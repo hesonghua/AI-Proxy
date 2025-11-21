@@ -83,7 +83,10 @@ class ProviderClient:
             
             logger.debug(f"请求数据: {data}")
             
-            response = await self.client.post(self.chat_endpoint, json=data)
+            # 使用httpx的流式请求，不等待完整响应
+            # 注意：不使用await，直接获取Request对象
+            request = self.client.build_request('POST', self.chat_endpoint, json=data)
+            response = await self.client.send(request, stream=True)
             response.raise_for_status()
             
             # 检查响应类型，处理流式和非流式响应
@@ -93,13 +96,24 @@ class ProviderClient:
                 # 处理流式响应 (Server-Sent Events)
                 logger.info(f"供应商 {self.provider.name} 返回流式响应")
                 
-                # 返回原始流式数据供API层处理
+                # 创建真正的流式生成器
+                async def stream_generator():
+                    try:
+                        async for chunk in response.aiter_text():
+                            yield chunk
+                    finally:
+                        # 确保响应被正确关闭
+                        await response.aclose()
+                
+                # 返回流式生成器供API层处理
                 result = {
-                    "stream_response": response.text
+                    "stream_response": stream_generator()
                 }
             else:
                 # 处理非流式响应
-                result = response.json()
+                content = await response.aread()
+                await response.aclose()
+                result = json.loads(content)
                 
                 # 在响应中返回完整的模型名称
                 if "model" in result:
