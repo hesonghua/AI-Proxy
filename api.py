@@ -198,14 +198,35 @@ async def create_chat_completion(request: ChatCompletionRequest,
         if request.stream and "stream_response" in result:
             logger.info("返回流式响应")
             
+            # 保存响应对象引用，用于清理
+            response_obj = result.get("_response_obj")
+            
             async def stream_wrapper():
-                """包装流式响应，确保正确传递SSE格式的数据"""
+                """包装流式响应，确保正确传递SSE格式的数据并处理资源清理"""
+                chunk_count = 0
                 try:
                     async for chunk in result["stream_response"]:
+                        chunk_count += 1
                         # 直接传递从供应商返回的SSE格式数据
                         yield chunk
+                    logger.debug(f"流式响应完成，共发送 {chunk_count} 个数据块")
+                except asyncio.CancelledError:
+                    logger.warning(f"客户端取消了流式请求，已发送 {chunk_count} 个数据块")
+                    # 确保底层连接被关闭
+                    if response_obj:
+                        try:
+                            await response_obj.aclose()
+                        except Exception as close_error:
+                            logger.error(f"关闭连接时出错: {str(close_error)}")
+                    raise
                 except Exception as e:
-                    logger.error(f"流式响应处理错误: {str(e)}")
+                    logger.error(f"流式响应处理错误: {str(e)}，已发送 {chunk_count} 个数据块")
+                    # 确保底层连接被关闭
+                    if response_obj:
+                        try:
+                            await response_obj.aclose()
+                        except Exception as close_error:
+                            logger.error(f"关闭连接时出错: {str(close_error)}")
                     # 发送错误事件
                     error_data = {
                         "error": {
@@ -215,6 +236,14 @@ async def create_chat_completion(request: ChatCompletionRequest,
                         }
                     }
                     yield f"data: {json.dumps(error_data)}\n\n"
+                finally:
+                    # 最终清理：确保连接被关闭
+                    if response_obj:
+                        try:
+                            await response_obj.aclose()
+                            logger.debug(f"流式响应连接已在finally块中关闭，共处理 {chunk_count} 个数据块")
+                        except Exception as e:
+                            logger.error(f"finally块中关闭连接失败: {str(e)}")
             
             return StreamingResponse(
                 stream_wrapper(),
@@ -222,7 +251,8 @@ async def create_chat_completion(request: ChatCompletionRequest,
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
-                    "Access-Control-Allow-Origin": "*"
+                    "Access-Control-Allow-Origin": "*",
+                    "X-Accel-Buffering": "no"  # 禁用nginx缓冲
                 }
             )
         

@@ -3,6 +3,7 @@ import asyncio
 import httpx
 import json
 import logging
+import time
 from typing import List, Dict, Any, Optional
 from config import Provider
 
@@ -13,8 +14,10 @@ logger = logging.getLogger(__name__)
 class ProviderClient:
     """供应商客户端"""
     
-    def __init__(self, provider: Provider):
+    def __init__(self, provider: Provider, config=None):
         self.provider = provider
+        self.config = config
+        
         # 检查URL是否已经包含完整的API路径
         if provider.url.endswith('/chat/completions'):
             # 如果URL已经包含完整路径，直接使用
@@ -24,19 +27,40 @@ class ProviderClient:
             # 标准OpenAI兼容API
             base_url = provider.url.rstrip('/')
             self.chat_endpoint = "/chat/completions"
-            
+        
+        # 从配置获取超时和连接池参数
+        stream_timeout = config.stream_timeout if config else 300.0
+        non_stream_timeout = config.non_stream_timeout if config else 30.0
+        max_connections = config.max_connections if config else 100
+        max_keepalive = config.max_keepalive_connections if config else 20
+        keepalive_expiry = config.keepalive_expiry if config else 30.0
+        
+        # 为流式请求使用更长的超时时间
         self.client = httpx.AsyncClient(
             base_url=base_url,
             headers={
                 "Authorization": f"Bearer {provider.api_key}",
                 "Content-Type": "application/json"
             },
-            timeout=30.0
+            timeout=httpx.Timeout(
+                connect=10.0,  # 连接超时
+                read=stream_timeout,  # 读取超时（从配置读取）
+                write=10.0,    # 写入超时
+                pool=10.0      # 连接池超时
+            ),
+            limits=httpx.Limits(
+                max_keepalive_connections=max_keepalive,  # 从配置读取
+                max_connections=max_connections,           # 从配置读取
+                keepalive_expiry=keepalive_expiry          # 从配置读取
+            )
         )
-        logger.info(f"初始化供应商客户端: {provider.name}, base_url: {base_url}, chat_endpoint: {self.chat_endpoint}")
+        logger.info(f"初始化供应商客户端: {provider.name}, base_url: {base_url}, "
+                   f"chat_endpoint: {self.chat_endpoint}, "
+                   f"stream_timeout: {stream_timeout}s, non_stream_timeout: {non_stream_timeout}s")
     
     async def get_models(self) -> List[Dict[str, Any]]:
         """获取供应商支持的模型列表"""
+        response = None
         try:
             logger.info(f"开始获取供应商 {self.provider.name} 的模型列表")
             response = await self.client.get("/models")
@@ -62,9 +86,19 @@ class ProviderClient:
         except Exception as e:
             logger.error(f"获取供应商 {self.provider.name} 模型失败: {e}")
             return []
+        finally:
+            # 确保响应被关闭
+            if response:
+                try:
+                    await response.aclose()
+                except:
+                    pass
     
     async def chat_completion(self, model: str, messages: List[Dict], **kwargs) -> Dict[str, Any]:
         """发送聊天完成请求"""
+        response = None
+        start_time = time.time()
+        
         try:
             # 解析模型名称，提取实际的模型ID
             if "/" in model:
@@ -83,47 +117,106 @@ class ProviderClient:
             
             logger.debug(f"请求数据: {data}")
             
-            # 使用httpx的流式请求，不等待完整响应
-            # 注意：不使用await，直接获取Request对象
-            request = self.client.build_request('POST', self.chat_endpoint, json=data)
-            response = await self.client.send(request, stream=True)
+            # 检查是否为流式请求
+            is_stream = kwargs.get('stream', False)
+            
+            # 根据是否流式选择不同的请求方式
+            if is_stream:
+                # 流式请求：使用stream=True
+                request = self.client.build_request('POST', self.chat_endpoint, json=data)
+                response = await self.client.send(request, stream=True)
+            else:
+                # 非流式请求：直接发送，不使用stream模式
+                response = await self.client.post(self.chat_endpoint, json=data)
+            
             response.raise_for_status()
             
             # 检查响应类型，处理流式和非流式响应
             content_type = response.headers.get('content-type', '')
             
-            if 'text/event-stream' in content_type:
+            if 'text/event-stream' in content_type or is_stream:
                 # 处理流式响应 (Server-Sent Events)
                 logger.info(f"供应商 {self.provider.name} 返回流式响应")
                 
                 # 创建真正的流式生成器
                 async def stream_generator():
+                    """流式生成器，确保资源正确释放"""
                     try:
                         async for chunk in response.aiter_text():
                             yield chunk
+                    except asyncio.CancelledError:
+                        logger.warning(f"供应商 {self.provider.name} 流式请求被取消")
+                        raise
+                    except Exception as e:
+                        logger.error(f"供应商 {self.provider.name} 流式响应错误: {str(e)}")
+                        raise
                     finally:
                         # 确保响应被正确关闭
-                        await response.aclose()
+                        try:
+                            await response.aclose()
+                            logger.debug(f"供应商 {self.provider.name} 流式响应连接已关闭")
+                        except Exception as e:
+                            logger.error(f"关闭流式响应连接时出错: {str(e)}")
                 
-                # 返回流式生成器供API层处理
+                # 返回流式生成器供API层处理，同时保存响应对象引用
                 result = {
-                    "stream_response": stream_generator()
+                    "stream_response": stream_generator(),
+                    "_response_obj": response  # 保存响应对象引用，便于外部清理
                 }
             else:
                 # 处理非流式响应
-                content = await response.aread()
-                await response.aclose()
-                result = json.loads(content)
-                
-                # 在响应中返回完整的模型名称
-                if "model" in result:
-                    result["model"] = model
+                try:
+                    # 从配置获取响应大小限制
+                    max_size = self.config.max_response_size if self.config else (10 * 1024 * 1024)
+                    
+                    # 检查响应大小
+                    content_length = response.headers.get('content-length')
+                    if content_length and int(content_length) > max_size:
+                        raise ValueError(f"响应大小 ({content_length} bytes) 超过限制 ({max_size} bytes)")
+                    
+                    # 读取响应内容
+                    if is_stream:
+                        # 如果使用了stream模式，需要用aread
+                        content = await response.aread()
+                    else:
+                        # 否则直接获取内容
+                        content = response.content
+                    
+                    # 检查实际读取的大小
+                    if len(content) > max_size:
+                        raise ValueError(f"实际响应大小 ({len(content)} bytes) 超过限制 ({max_size} bytes)")
+                    
+                    result = json.loads(content)
+                    
+                    # 在响应中返回完整的模型名称
+                    if "model" in result:
+                        result["model"] = model
+                    
+                    # 记录响应时间
+                    elapsed_time = time.time() - start_time
+                    logger.info(f"供应商 {self.provider.name} 非流式响应成功，耗时: {elapsed_time:.2f}秒，响应大小: {len(content)} bytes")
+                    
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON解析失败: {str(e)}, 内容: {content[:200] if content else 'empty'}")
+                    raise
+                except ValueError as e:
+                    logger.error(f"响应大小验证失败: {str(e)}")
+                    raise
+                finally:
+                    # 确保非流式响应也被关闭
+                    await response.aclose()
+                    logger.debug(f"供应商 {self.provider.name} 非流式响应连接已关闭")
             
-            logger.info(f"供应商 {self.provider.name} 响应成功")
             return result
             
         except httpx.HTTPStatusError as e:
             logger.error(f"供应商 {self.provider.name} HTTP错误: {e.response.status_code} - {e.response.text}")
+            # 确保错误情况下也关闭连接
+            if response:
+                try:
+                    await response.aclose()
+                except:
+                    pass
             return {
                 "error": {
                     "message": f"供应商 {self.provider.name} 请求失败: HTTP {e.response.status_code}",
@@ -133,6 +226,12 @@ class ProviderClient:
             }
         except Exception as e:
             logger.error(f"供应商 {self.provider.name} 请求异常: {str(e)}")
+            # 确保异常情况下也关闭连接
+            if response:
+                try:
+                    await response.aclose()
+                except:
+                    pass
             return {
                 "error": {
                     "message": f"请求供应商 {self.provider.name} 失败: {str(e)}",
@@ -164,7 +263,7 @@ class ModelManager:
     
     def __init__(self, providers: List[Provider], config=None):
         self.providers = providers
-        self.clients = {p.name: ProviderClient(p) for p in providers}
+        self.clients = {p.name: ProviderClient(p, config) for p in providers}
         self._models_cache: Optional[List[Dict[str, Any]]] = None
         self.config = config
         logger.info(f"初始化模型管理器，供应商数量: {len(providers)}")
@@ -242,16 +341,18 @@ class ModelManager:
         """检查所有供应商的健康状态"""
         logger.info("开始健康检查")
         health_status = {}
-        tasks = []
         
-        for name, client in self.clients.items():
-            tasks.append((name, client.health_check()))
+        # 使用asyncio.gather并发执行健康检查
+        tasks = [client.health_check() for client in self.clients.values()]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        for name, task in tasks:
-            try:
-                health_status[name] = await task
-            except Exception as e:
-                logger.error(f"供应商 {name} 健康检查异常: {e}")
+        for i, (name, result) in enumerate(zip(self.clients.keys(), results)):
+            if isinstance(result, bool):
+                health_status[name] = result
+            elif isinstance(result, Exception):
+                logger.error(f"供应商 {name} 健康检查异常: {result}")
+                health_status[name] = False
+            else:
                 health_status[name] = False
         
         healthy_count = sum(1 for status in health_status.values() if status)

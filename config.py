@@ -6,17 +6,45 @@ import logging
 from typing import List, Tuple, Dict
 from dataclasses import dataclass
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('ai_proxy.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+# 日志级别映射
+LOG_LEVEL_MAP = {
+    'DEBUG': logging.DEBUG,
+    'INFO': logging.INFO,
+    'WARNING': logging.WARNING,
+    'WARN': logging.WARNING,
+    'ERROR': logging.ERROR,
+    'CRITICAL': logging.CRITICAL
+}
 
-logger = logging.getLogger(__name__)
+def setup_logging(log_level: str = 'WARNING'):
+    """配置日志系统
+    
+    Args:
+        log_level: 日志级别，可选值: DEBUG, INFO, WARNING, ERROR, CRITICAL
+                  默认为 WARNING
+    """
+    level = LOG_LEVEL_MAP.get(log_level.upper(), logging.WARNING)
+    
+    # 清除现有的handlers
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # 重新配置日志
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('ai_proxy.log', encoding='utf-8'),
+            logging.StreamHandler()
+        ],
+        force=True  # 强制重新配置
+    )
+    
+    return logging.getLogger(__name__)
+
+# 初始化logger（使用默认级别）
+logger = setup_logging()
 
 
 @dataclass
@@ -52,6 +80,20 @@ class Config:
         self.supported_models: List[str] = []
         self.host: str = "localhost"
         self.port: int = 8080
+        self.log_level: str = "WARNING"  # 默认日志级别
+        
+        # 连接池配置
+        self.max_connections: int = 100  # 最大连接数
+        self.max_keepalive_connections: int = 20  # 最大保持连接数
+        self.keepalive_expiry: float = 30.0  # 连接过期时间（秒）
+        
+        # 超时配置
+        self.stream_timeout: float = 300.0  # 流式超时（秒）
+        self.non_stream_timeout: float = 30.0  # 非流式超时（秒）
+        
+        # 响应大小限制
+        self.max_response_size: int = 10 * 1024 * 1024  # 10MB
+        
         logger.info(f"初始化配置管理器，配置文件: {config_file}")
         self.load_config()
     
@@ -67,6 +109,32 @@ class Config:
             
             self.host = config_data.get('host', 'localhost')
             self.port = config_data.get('port', 8080)
+            
+            # 加载日志级别配置
+            new_log_level = config_data.get('log_level', 'WARNING').upper()
+            if new_log_level != self.log_level:
+                self.log_level = new_log_level
+                # 重新配置日志级别
+                setup_logging(self.log_level)
+                logging.getLogger(__name__).info(f"日志级别已设置为: {self.log_level}")
+            
+            # 加载连接池配置
+            self.max_connections = config_data.get('max_connections', 100)
+            self.max_keepalive_connections = config_data.get('max_keepalive_connections', 20)
+            self.keepalive_expiry = config_data.get('keepalive_expiry', 30.0)
+            
+            # 加载超时配置
+            self.stream_timeout = config_data.get('stream_timeout', 300.0)
+            self.non_stream_timeout = config_data.get('non_stream_timeout', 30.0)
+            
+            # 加载响应大小限制
+            self.max_response_size = config_data.get('max_response_size', 10 * 1024 * 1024)
+            
+            logger.info(f"连接池配置 - 最大连接数: {self.max_connections}, "
+                       f"保持连接数: {self.max_keepalive_connections}, "
+                       f"过期时间: {self.keepalive_expiry}秒")
+            logger.info(f"超时配置 - 流式: {self.stream_timeout}秒, 非流式: {self.non_stream_timeout}秒")
+            logger.info(f"响应大小限制: {self.max_response_size / 1024 / 1024:.1f}MB")
 
             # 加载供应商配置
             self.providers = []
