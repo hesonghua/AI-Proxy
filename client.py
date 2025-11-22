@@ -14,6 +14,39 @@ logger = logging.getLogger(__name__)
 class ProviderClient:
     """供应商客户端"""
     
+    @staticmethod
+    def parse_model_name(model: str) -> tuple:
+        """解析模型名称，返回(供应商名称, 实际模型名)
+        
+        Args:
+            model: 模型名称，格式为 "供应商/模型" 或 "模型"
+            
+        Returns:
+            (供应商名称, 实际模型名) 元组
+        """
+        if "/" in model:
+            parts = model.split("/", 1)
+            return parts[0], parts[1]
+        return "", model
+    
+    def _create_error_response(self, message: str, error_type: str = "provider_error") -> dict:
+        """创建统一的错误响应
+        
+        Args:
+            message: 错误消息
+            error_type: 错误类型
+            
+        Returns:
+            标准错误响应字典
+        """
+        return {
+            "error": {
+                "message": f"供应商 {self.provider.name}: {message}",
+                "type": error_type,
+                "code": "provider_request_failed"
+            }
+        }
+    
     def __init__(self, provider: Provider, config=None):
         self.provider = provider
         self.config = config
@@ -164,31 +197,38 @@ class ProviderClient:
         # 所有重试都失败，返回空列表
         return []
     
-    async def chat_completion(self, model: str, messages: List[Dict], **kwargs) -> Dict[str, Any]:
-        """发送聊天完成请求"""
+    async def chat_completion(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """发送聊天完成请求 - 接受完整的请求体字典"""
         response = None
         start_time = time.time()
+        is_stream_response = False  # 标记是否为流式响应
         
         try:
+            model = body.get("model")
+            messages = body.get("messages")
+            
+            if not model or not messages:
+                return {
+                    "error": {
+                        "message": "缺少必需参数: model 或 messages",
+                        "type": "invalid_request",
+                        "code": "invalid_request"
+                    }
+                }
+            
             # 解析模型名称，提取实际的模型ID
-            if "/" in model:
-                _, actual_model = model.split("/", 1)
-            else:
-                actual_model = model
+            _, actual_model = self.parse_model_name(model)
             
             logger.info(f"向供应商 {self.provider.name} 发送聊天请求，模型: {actual_model}, 消息数: {len(messages)}")
             
-            # 构建请求数据
-            data = {
-                "model": actual_model,
-                "messages": messages,
-                **kwargs
-            }
+            # 构造要发送给上游的请求体：原样保留所有参数，仅替换 model 字段
+            data = dict(body)
+            data["model"] = actual_model
             
-            logger.debug(f"请求数据: {data}")
+            logger.debug(f"请求数据: {json.dumps(data, ensure_ascii=False)}")
             
             # 检查是否为流式请求
-            is_stream = kwargs.get('stream', False)
+            is_stream = body.get('stream', False)
             
             # 根据是否流式选择不同的请求方式
             if is_stream:
@@ -207,6 +247,7 @@ class ProviderClient:
             if 'text/event-stream' in content_type or is_stream:
                 # 处理流式响应 (Server-Sent Events)
                 logger.info(f"供应商 {self.provider.name} 返回流式响应")
+                is_stream_response = True  # 标记为流式响应
                 
                 # 创建真正的流式生成器
                 async def stream_generator():
@@ -228,10 +269,10 @@ class ProviderClient:
                         except Exception as e:
                             logger.error(f"关闭流式响应连接时出错: {str(e)}")
                 
-                # 返回流式生成器供API层处理，同时保存响应对象引用
+                # 返回流式生成器供API层处理
+                # 注意：连接关闭由stream_generator的finally块管理
                 result = {
-                    "stream_response": stream_generator(),
-                    "_response_obj": response  # 保存响应对象引用，便于外部清理
+                    "stream_response": stream_generator()
                 }
             else:
                 # 处理非流式响应
@@ -272,43 +313,24 @@ class ProviderClient:
                 except ValueError as e:
                     logger.error(f"响应大小验证失败: {str(e)}")
                     raise
-                finally:
-                    # 确保非流式响应也被关闭
-                    await response.aclose()
-                    logger.debug(f"供应商 {self.provider.name} 非流式响应连接已关闭")
             
             return result
             
         except httpx.HTTPStatusError as e:
             logger.error(f"供应商 {self.provider.name} HTTP错误: {e.response.status_code} - {e.response.text}")
-            # 确保错误情况下也关闭连接
-            if response:
-                try:
-                    await response.aclose()
-                except:
-                    pass
-            return {
-                "error": {
-                    "message": f"供应商 {self.provider.name} 请求失败: HTTP {e.response.status_code}",
-                    "type": "provider_error",
-                    "code": "provider_request_failed"
-                }
-            }
+            return self._create_error_response(f"请求失败: HTTP {e.response.status_code}")
         except Exception as e:
             logger.error(f"供应商 {self.provider.name} 请求异常: {str(e)}")
-            # 确保异常情况下也关闭连接
-            if response:
+            return self._create_error_response(f"请求失败: {str(e)}")
+        finally:
+            # 只有非流式响应才在这里关闭连接
+            # 流式响应的连接由stream_generator的finally块管理
+            if response and not is_stream_response:
                 try:
                     await response.aclose()
-                except:
-                    pass
-            return {
-                "error": {
-                    "message": f"请求供应商 {self.provider.name} 失败: {str(e)}",
-                    "type": "provider_error",
-                    "code": "provider_request_failed"
-                }
-            }
+                    logger.debug(f"供应商 {self.provider.name} 非流式响应连接已关闭")
+                except Exception as e:
+                    logger.error(f"关闭非流式响应连接失败: {str(e)}")
     
     async def health_check(self) -> bool:
         """健康检查"""
@@ -381,20 +403,33 @@ class ModelManager:
     
     def get_provider_client(self, model: str) -> Optional[ProviderClient]:
         """根据模型名称获取对应的供应商客户端"""
-        if "/" in model:
-            provider_name, actual_model = model.split("/", 1)
-            client = self.clients.get(provider_name)
-            if client:
-                logger.debug(f"找到模型 {model} 对应的供应商: {provider_name}")
-            else:
-                logger.warning(f"未找到模型 {model} 对应的供应商: {provider_name}")
-            return client
-        else:
+        provider_name, _ = ProviderClient.parse_model_name(model)
+        
+        if not provider_name:
             logger.warning(f"模型名称格式错误，缺少供应商前缀: {model}")
-        return None
+            return None
+        
+        client = self.clients.get(provider_name)
+        if client:
+            logger.debug(f"找到模型 {model} 对应的供应商: {provider_name}")
+        else:
+            logger.warning(f"未找到模型 {model} 对应的供应商: {provider_name}")
+        return client
     
-    async def chat_completion(self, model: str, messages: List[Dict], **kwargs) -> Dict[str, Any]:
-        """发送聊天完成请求"""
+    async def chat_completion(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """发送聊天完成请求 - 接受完整的请求体字典"""
+        model = body.get("model")
+        messages = body.get("messages")
+        
+        if not model or not messages:
+            return {
+                "error": {
+                    "message": "缺少必需参数: model 或 messages",
+                    "type": "invalid_request",
+                    "code": "invalid_request"
+                }
+            }
+        
         logger.info(f"处理聊天完成请求，模型: {model}, 消息数: {len(messages)}")
         
         client = self.get_provider_client(model)
@@ -408,7 +443,8 @@ class ModelManager:
                 }
             }
         
-        result = await client.chat_completion(model, messages, **kwargs)
+        # 直接将完整 body 传递给 ProviderClient
+        result = await client.chat_completion(body)
         
         if "error" in result:
             logger.error(f"聊天完成请求失败: {result['error']['message']}")

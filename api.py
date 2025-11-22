@@ -46,21 +46,7 @@ def get_current_token(credentials: Optional[HTTPAuthorizationCredentials] = Depe
     return credentials.credentials
 
 
-# 请求/响应模型
-class Message(BaseModel):
-    role: str
-    content: Union[str, List[Dict[str, Any]]]  # 支持字符串或数组
-
-
-class ChatCompletionRequest(BaseModel):
-    model: str
-    messages: List[Message]
-    temperature: Optional[float] = Field(default=1.0, ge=0, le=2)
-    max_tokens: Optional[int] = Field(default=None, ge=1)
-    stream: Optional[bool] = Field(default=False)
-    top_p: Optional[float] = Field(default=1.0, ge=0, le=1)
-    frequency_penalty: Optional[float] = Field(default=0.0, ge=-2.0, le=2.0)
-    presence_penalty: Optional[float] = Field(default=0.0, ge=-2.0, le=2.0)
+# 响应模型
 
 
 class ModelInfo(BaseModel):
@@ -84,27 +70,6 @@ app = FastAPI(
 )
 
 
-def normalize_message_content(content):
-    """标准化消息内容格式"""
-    if isinstance(content, str):
-        return content
-    elif isinstance(content, list):
-        # 处理数组格式的内容
-        if all(isinstance(item, dict) and 'text' in item for item in content):
-            return ' '.join(item['text'] for item in content)
-        elif all(isinstance(item, dict) and 'type' in item and 'text' in item for item in content):
-            # 处理 kilo 插件格式: [{'type': 'text', 'text': '...'}]
-            return ' '.join(item['text'] for item in content if item.get('type') == 'text')
-        elif all(isinstance(item, str) for item in content):
-            return ' '.join(content)
-        else:
-            # 其他情况，尝试转换为字符串
-            try:
-                return ' '.join(str(item) for item in content)
-            except:
-                return str(content)
-    else:
-        return str(content)
 
 
 @app.get("/health")
@@ -139,70 +104,58 @@ async def list_models():
 
 
 @app.post("/v1/chat/completions")
-async def create_chat_completion(request: ChatCompletionRequest, 
+async def create_chat_completion(request: Request,
                                  token: Optional[str] = Depends(get_current_token)):
-    """创建聊天完成"""
+    """创建聊天完成 - 接受任意参数并转发给上游"""
     try:
-        logger.info(f"收到聊天完成请求，模型: {request.model}, 消息数: {len(request.messages)}")
-        
-        # 验证token - token是强制性的
+        # 1. 先验证 token（不解析 body，避免无效请求浪费资源）
         if not token:
             logger.warning("未提供API token")
             raise HTTPException(
-                status_code=401, 
+                status_code=401,
                 detail="未提供API token"
             )
         
         if not config.validate_token(token):
             logger.warning(f"无效的API token: {token}")
             raise HTTPException(
-                status_code=401, 
+                status_code=401,
                 detail="无效的API token"
             )
         
-        logger.info(f"token验证通过，使用token: {config.get_token_info(token)}")
+        token_info = config.get_token_info(token)
+        logger.info(f"token验证通过，使用token: {token_info}")
         
-        # 标准化消息格式 - 处理各种content格式
-        normalized_messages = []
-        for msg in request.messages:
-            normalized_content = normalize_message_content(msg.content)
-            normalized_messages.append({
-                "role": msg.role,
-                "content": normalized_content
-            })
+        # 2. 解析请求体
+        body = await request.json()
+        
+        # 验证必需参数
+        if not body.get("model"):
+            raise HTTPException(status_code=400, detail="缺少必需参数: model")
+        
+        # 提取stream参数（用于判断响应类型）
+        is_stream = body.get("stream", False)
         
         # 记录请求参数
-        logger.debug(f"请求参数 - temperature: {request.temperature}, max_tokens: {request.max_tokens}, stream: {request.stream}")
+        logger.debug(f"请求参数: {json.dumps(body, ensure_ascii=False)}")
         
-        # 调用模型管理器
-        result = await model_manager.chat_completion(
-            model=request.model,
-            messages=normalized_messages,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-            stream=request.stream,
-            top_p=request.top_p,
-            frequency_penalty=request.frequency_penalty,
-            presence_penalty=request.presence_penalty
-        )
+        # 3. 直接把原始 body 传给模型管理器
+        result = await model_manager.chat_completion(body)
         
         # 检查是否有错误
         if "error" in result:
             logger.error(f"聊天完成请求返回错误: {result['error']['message']}")
             raise HTTPException(
-                status_code=500, 
+                status_code=500,
                 detail=result["error"]["message"]
             )
         
         # 处理流式响应
-        if request.stream and "stream_response" in result:
+        if is_stream and "stream_response" in result:
             logger.info("返回流式响应")
             
-            # 保存响应对象引用，用于清理
-            response_obj = result.get("_response_obj")
-            
             async def stream_wrapper():
-                """包装流式响应，确保正确传递SSE格式的数据并处理资源清理"""
+                """包装流式响应，确保正确传递SSE格式的数据"""
                 chunk_count = 0
                 try:
                     async for chunk in result["stream_response"]:
@@ -212,21 +165,9 @@ async def create_chat_completion(request: ChatCompletionRequest,
                     logger.debug(f"流式响应完成，共发送 {chunk_count} 个数据块")
                 except asyncio.CancelledError:
                     logger.warning(f"客户端取消了流式请求，已发送 {chunk_count} 个数据块")
-                    # 确保底层连接被关闭
-                    if response_obj:
-                        try:
-                            await response_obj.aclose()
-                        except Exception as close_error:
-                            logger.error(f"关闭连接时出错: {str(close_error)}")
                     raise
                 except Exception as e:
                     logger.error(f"流式响应处理错误: {str(e)}，已发送 {chunk_count} 个数据块")
-                    # 确保底层连接被关闭
-                    if response_obj:
-                        try:
-                            await response_obj.aclose()
-                        except Exception as close_error:
-                            logger.error(f"关闭连接时出错: {str(close_error)}")
                     # 发送错误事件
                     error_data = {
                         "error": {
@@ -236,14 +177,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
                         }
                     }
                     yield f"data: {json.dumps(error_data)}\n\n"
-                finally:
-                    # 最终清理：确保连接被关闭
-                    if response_obj:
-                        try:
-                            await response_obj.aclose()
-                            logger.debug(f"流式响应连接已在finally块中关闭，共处理 {chunk_count} 个数据块")
-                        except Exception as e:
-                            logger.error(f"finally块中关闭连接失败: {str(e)}")
             
             return StreamingResponse(
                 stream_wrapper(),
