@@ -17,6 +17,9 @@ class ProviderClient:
     def __init__(self, provider: Provider, config=None):
         self.provider = provider
         self.config = config
+        self._models_cache: Optional[List[Dict[str, Any]]] = None  # 模型缓存
+        self._last_fetch_time: Optional[float] = None  # 上次获取时间
+        self._fetch_failed: bool = False  # 是否获取失败
         
         # 检查URL是否已经包含完整的API路径
         if provider.url.endswith('/chat/completions'):
@@ -58,41 +61,108 @@ class ProviderClient:
                    f"chat_endpoint: {self.chat_endpoint}, "
                    f"stream_timeout: {stream_timeout}s, non_stream_timeout: {non_stream_timeout}s")
     
-    async def get_models(self) -> List[Dict[str, Any]]:
-        """获取供应商支持的模型列表"""
-        response = None
-        try:
-            logger.info(f"开始获取供应商 {self.provider.name} 的模型列表")
-            response = await self.client.get("/models")
-            response.raise_for_status()
-            data = response.json()
+    async def get_models(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """获取供应商支持的模型列表
+        
+        Args:
+            force_refresh: 是否强制刷新，默认False
             
-            # 标准化模型数据格式
-            models = []
-            if "data" in data:
-                for model in data["data"]:
-                    # 添加供应商前缀到模型ID
-                    model_id = f"{self.provider.name}/{model.get('id', model.get('model', ''))}"
-                    models.append({
-                        "id": model_id,
-                        "object": model.get("object", "model"),
-                        "created": model.get("created"),
-                        "owned_by": self.provider.name
-                    })
+        Returns:
+            模型列表
+        """
+        import time
+        current_time = time.time()
+        
+        # 如果有缓存且不强制刷新
+        if not force_refresh and self._models_cache is not None:
+            # 如果之前获取失败，且距离上次尝试超过10秒，重新尝试
+            if self._fetch_failed and self._last_fetch_time:
+                time_since_last = current_time - self._last_fetch_time
+                if time_since_last > 10:
+                    logger.info(f"供应商 {self.provider.name} 上次获取失败，10秒后重试...")
+                    # 继续执行获取逻辑
+                else:
+                    # 返回缓存（可能为空）
+                    logger.debug(f"供应商 {self.provider.name} 使用缓存 (失败状态，等待重试)")
+                    return self._models_cache
+            else:
+                # 成功状态，直接返回缓存
+                logger.debug(f"供应商 {self.provider.name} 使用缓存的模型列表")
+                return self._models_cache
+        
+        # 执行获取逻辑（带重试）
+        models = await self._fetch_models_with_retry()
+        
+        # 更新缓存和状态
+        self._models_cache = models
+        self._last_fetch_time = current_time
+        self._fetch_failed = (len(models) == 0)
+        
+        return models
+    
+    async def _fetch_models_with_retry(self, max_retries: int = 3) -> List[Dict[str, Any]]:
+        """从供应商获取模型列表（带重试）
+        
+        Args:
+            max_retries: 最大重试次数
             
-            logger.info(f"成功获取供应商 {self.provider.name} 的 {len(models)} 个模型")
-            return models
-            
-        except Exception as e:
-            logger.error(f"获取供应商 {self.provider.name} 模型失败: {e}")
-            return []
-        finally:
-            # 确保响应被关闭
-            if response:
-                try:
-                    await response.aclose()
-                except:
-                    pass
+        Returns:
+            模型列表，失败返回空列表
+        """
+        for attempt in range(max_retries):
+            response = None
+            try:
+                if attempt > 0:
+                    # 重试前等待，使用指数退避
+                    wait_time = min(2 ** attempt, 10)
+                    logger.info(f"供应商 {self.provider.name} 第 {attempt + 1}/{max_retries} 次重试，等待 {wait_time} 秒...")
+                    await asyncio.sleep(wait_time)
+                
+                logger.info(f"开始获取供应商 {self.provider.name} 的模型列表 (尝试 {attempt + 1}/{max_retries})")
+                
+                # 使用较短的超时时间获取模型列表
+                response = await self.client.get("/models", timeout=15.0)
+                response.raise_for_status()
+                data = response.json()
+                
+                # 标准化模型数据格式
+                models = []
+                if "data" in data:
+                    for model in data["data"]:
+                        # 添加供应商前缀到模型ID
+                        model_id = f"{self.provider.name}/{model.get('id', model.get('model', ''))}"
+                        models.append({
+                            "id": model_id,
+                            "object": model.get("object", "model"),
+                            "created": model.get("created"),
+                            "owned_by": self.provider.name
+                        })
+                
+                logger.info(f"成功获取供应商 {self.provider.name} 的 {len(models)} 个模型")
+                return models
+                
+            except httpx.TimeoutException as e:
+                logger.warning(f"获取供应商 {self.provider.name} 模型超时 (尝试 {attempt + 1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    logger.error(f"获取供应商 {self.provider.name} 模型失败：超过最大重试次数")
+            except httpx.NetworkError as e:
+                logger.warning(f"获取供应商 {self.provider.name} 模型网络错误 (尝试 {attempt + 1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    logger.error(f"获取供应商 {self.provider.name} 模型失败：网络错误")
+            except Exception as e:
+                logger.warning(f"获取供应商 {self.provider.name} 模型失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    logger.error(f"获取供应商 {self.provider.name} 模型失败：{e}")
+            finally:
+                # 确保响应被关闭
+                if response:
+                    try:
+                        await response.aclose()
+                    except:
+                        pass
+        
+        # 所有重试都失败，返回空列表
+        return []
     
     async def chat_completion(self, model: str, messages: List[Dict], **kwargs) -> Dict[str, Any]:
         """发送聊天完成请求"""
@@ -264,39 +334,49 @@ class ModelManager:
     def __init__(self, providers: List[Provider], config=None):
         self.providers = providers
         self.clients = {p.name: ProviderClient(p, config) for p in providers}
-        self._models_cache: Optional[List[Dict[str, Any]]] = None
         self.config = config
         logger.info(f"初始化模型管理器，供应商数量: {len(providers)}")
     
-    async def get_all_models(self) -> List[Dict[str, Any]]:
-        """获取所有供应商的模型列表"""
-        if self._models_cache is not None:
-            logger.debug("使用缓存的模型列表")
-            return self._models_cache
+    async def get_all_models(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """获取所有供应商的模型列表
         
+        Args:
+            force_refresh: 是否强制刷新缓存，默认False
+            
+        Returns:
+            模型列表
+        """
         logger.info("开始获取所有供应商的模型列表")
         all_models = []
         tasks = []
         
+        # 并发调用所有供应商的get_models
+        # 每个ProviderClient会自己管理缓存和重试
         for client in self.clients.values():
-            tasks.append(client.get_models())
+            tasks.append(client.get_models(force_refresh=force_refresh))
         
         # 并发获取所有供应商的模型
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
+        success_count = 0
         for i, result in enumerate(results):
+            provider_name = list(self.clients.keys())[i]
             if isinstance(result, list):
-                all_models.extend(result)
-                logger.debug(f"供应商 {list(self.clients.keys())[i]} 返回 {len(result)} 个模型")
+                if result:
+                    all_models.extend(result)
+                    success_count += 1
+                    logger.debug(f"供应商 {provider_name} 返回 {len(result)} 个模型")
+                else:
+                    logger.debug(f"供应商 {provider_name} 返回空模型列表")
             else:
-                logger.warning(f"供应商 {list(self.clients.keys())[i]} 获取模型失败: {result}")
+                logger.warning(f"供应商 {provider_name} 获取模型异常: {result}")
         
         # 如果有config，则过滤模型列表
         if self.config:
             all_models = self.config.filter_models(all_models)
         
-        self._models_cache = all_models
-        logger.info(f"成功获取 {len(all_models)} 个模型")
+        logger.info(f"获取到 {len(all_models)} 个模型 (成功供应商: {success_count}/{len(self.clients)})")
+        
         return all_models
     
     def get_provider_client(self, model: str) -> Optional[ProviderClient]:
@@ -360,9 +440,12 @@ class ModelManager:
         return health_status
     
     def clear_cache(self):
-        """清除模型缓存"""
-        logger.info("清除模型缓存")
-        self._models_cache = None
+        """清除所有供应商的模型缓存"""
+        logger.info("清除所有供应商的模型缓存")
+        for client in self.clients.values():
+            client._models_cache = None
+            client._fetch_failed = False
+            client._last_fetch_time = None
     
     async def close_all(self):
         """关闭所有客户端连接"""
