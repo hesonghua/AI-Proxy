@@ -3,7 +3,7 @@ import os
 import json
 import re
 import logging
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass
 
 # 日志级别映射
@@ -53,10 +53,41 @@ class Provider:
     name: str
     url: str
     api_key: str
+    model_list: List[str]
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Provider':
+        """从字典创建Provider实例
+        
+        Args:
+            data: 包含provider配置的字典，格式：
+                  {
+                      "provider": "供应商名称",
+                      "baseurl": "API URL",
+                      "token": "API密钥",
+                      "model_list": ["model1", "model2"] (可选)
+                  }
+        
+        Returns:
+            Provider实例
+        """
+        return cls(
+            name=data['provider'].strip(),
+            url=data['baseurl'].rstrip('/'),
+            api_key=data['token'].strip(),
+            model_list=data.get('model_list', [])
+        )
     
     @classmethod
     def from_line(cls, line: str) -> 'Provider | None':
-        """从配置行创建Provider实例"""
+        """从配置行创建Provider实例（兼容旧格式）
+        
+        Args:
+            line: 格式为 "供应商名称|URL|API_KEY" 的字符串
+        
+        Returns:
+            Provider实例或None
+        """
         line = line.strip()
         if not line or line.startswith('#'):
             return None
@@ -67,7 +98,12 @@ class Provider:
         
         name, url, api_key = parts
         
-        return cls(name=name.strip(), url=url.rstrip('/'), api_key=api_key)
+        return cls(
+            name=name.strip(),
+            url=url.rstrip('/'),
+            api_key=api_key.strip(),
+            model_list=[]
+        )
 
 
 class Config:
@@ -139,11 +175,26 @@ class Config:
             # 加载供应商配置
             self.providers = []
             providers_data = config_data.get('providers', [])
-            for line in providers_data:
-                provider = Provider.from_line(line)
-                if provider:
-                    self.providers.append(provider)
-                    logger.debug(f"加载供应商: {provider.name}")
+            
+            for item in providers_data:
+                try:
+                    if isinstance(item, dict):
+                        # 新格式：字典对象
+                        provider = Provider.from_dict(item)
+                    elif isinstance(item, str):
+                        # 旧格式：字符串 "name|url|key"
+                        provider = Provider.from_line(item)
+                    else:
+                        logger.warning(f"未知的供应商配置格式: {item}")
+                        continue
+                    
+                    if provider:
+                        self.providers.append(provider)
+                        model_count = len(provider.model_list) if provider.model_list else "自动获取"
+                        logger.debug(f"加载供应商: {provider.name}, 模型列表: {model_count}")
+                except Exception as e:
+                    logger.error(f"加载供应商配置失败: {item}, 错误: {e}")
+                    continue
             
             logger.info(f"成功加载 {len(self.providers)} 个供应商配置")
             

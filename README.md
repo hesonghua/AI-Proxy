@@ -9,6 +9,7 @@
 - ✅ 流式和非流式响应支持
 - ✅ 模型名称格式：`供应商/模型`
 - ✅ 自动获取供应商模型列表
+- ✅ 支持手动配置模型列表
 - ✅ 配置文件热重载
 - ✅ Token验证机制
 - ✅ 健康检查和监控
@@ -41,8 +42,18 @@ cp config.json.example config.json
   "port": 8001,
   "log_level": "WARNING",
   "providers": [
-    "zhipu|https://open.bigmodel.cn/api/paas/v4|your-api-key",
-    "openai|https://api.openai.com/v1|sk-your-key"
+    {
+      "provider": "zhipu",
+      "baseurl": "https://open.bigmodel.cn/api/paas/v4",
+      "token": "your-api-key",
+      "model_list": []
+    },
+    {
+      "provider": "openai",
+      "baseurl": "https://api.openai.com/v1",
+      "token": "sk-your-key",
+      "model_list": ["gpt-4", "gpt-3.5-turbo"]
+    }
   ],
   "tokens": [
     "my-token|sk-test-123456"
@@ -82,16 +93,51 @@ python api.py
 
 ### 供应商配置格式
 
+**新格式（推荐）**：使用JSON对象
+```json
+{
+  "provider": "供应商名称",
+  "baseurl": "API_URL",
+  "token": "API_KEY",
+  "model_list": ["model1", "model2"]
+}
+```
+
+**旧格式（兼容）**：使用字符串
 ```
 供应商名称|API_URL|API_KEY
 ```
 
-示例：
+#### 配置说明
+
+- `provider`: 供应商名称，用于模型ID前缀（如 `zhipu/glm-4`）
+- `baseurl`: API基础URL，会自动去除末尾的斜杠
+- `token`: API密钥或访问令牌
+- `model_list`: 可选，模型列表
+  - 如果为空数组 `[]`，或者不填，则自动从供应商API获取模型列表
+  - 如果指定模型，则只使用指定的模型，不会自动获取
+
+#### 示例
+
 ```json
 "providers": [
-  "zhipu|https://open.bigmodel.cn/api/paas/v4|your-zhipu-key",
-  "openai|https://api.openai.com/v1|sk-your-openai-key",
-  "anthropic|https://api.anthropic.com/v1|sk-ant-your-key"
+  {
+    "provider": "zhipu",
+    "baseurl": "https://open.bigmodel.cn/api/paas/v4",
+    "token": "your-zhipu-key",
+  },
+  {
+    "provider": "openai",
+    "baseurl": "https://api.openai.com/v1",
+    "token": "sk-your-openai-key",
+    "model_list": ["gpt-4", "gpt-3.5-turbo", "gpt-4-turbo"]
+  },
+  {
+    "provider": "anthropic",
+    "baseurl": "https://api.anthropic.com/v1",
+    "token": "sk-ant-your-key",
+    "model_list": []
+  }
 ]
 ```
 
@@ -118,8 +164,18 @@ python api.py
   "log_level": "WARNING",
   
   "providers": [
-    "zhipu|https://open.bigmodel.cn/api/paas/v4|your-api-key",
-    "openai|https://api.openai.com/v1|sk-your-key"
+    {
+      "provider": "zhipu",
+      "baseurl": "https://open.bigmodel.cn/api/paas/v4",
+      "token": "your-api-key",
+      "model_list": []
+    },
+    {
+      "provider": "openai",
+      "baseurl": "https://api.openai.com/v1",
+      "token": "sk-your-key",
+      "model_list": ["gpt-4", "gpt-3.5-turbo"]
+    }
   ],
   
   "tokens": [
@@ -170,6 +226,38 @@ python api.py
 - `max_response_size`: 最大响应大小（字节），防止内存耗尽
   - 默认10MB (10485760字节)
   - 可根据实际需求调整
+
+#### 模型列表配置
+
+供应商的 `model_list` 字段有两种使用方式：
+
+1. **自动获取模式**（推荐）
+   ```json
+   {
+     "provider": "openai",
+     "baseurl": "https://api.openai.com/v1",
+     "token": "sk-your-key"
+   }
+   ```
+   - 设置为空数组 `[]`
+   - 程序会自动调用供应商的 `/models` 接口获取模型列表
+   - 适用于模型列表经常变化的供应商
+
+2. **手动指定模式**
+   ```json
+   {
+     "provider": "openai",
+     "baseurl": "https://api.openai.com/v1",
+     "token": "sk-your-key",
+     "model_list": ["gpt-4", "gpt-3.5-turbo", "gpt-4-turbo"]
+   }
+   ```
+   - 明确指定可用的模型列表
+   - 程序不会调用供应商API获取模型
+   - 适用于：
+     - 供应商不提供模型列表接口
+     - 只想暴露部分模型
+     - 减少API调用次数
 
 ## 🔌 API端点
 
@@ -329,6 +417,13 @@ curl -X POST http://localhost:8001/v1/chat/completions \
 - ✅ 返回详细的健康状态
 - ✅ 支持定期监控
 
+### 5. 灵活的模型管理
+
+- ✅ 支持自动获取模型列表
+- ✅ 支持手动指定模型列表
+- ✅ 支持正则表达式过滤模型
+- ✅ 兼容新旧配置格式
+
 ## 📊 性能特性
 
 所有性能参数均可通过 `config.json` 配置：
@@ -341,7 +436,7 @@ curl -X POST http://localhost:8001/v1/chat/completions \
 | 最大连接数 | 100 | `max_connections` | 连接池的最大连接数 |
 | 保持连接数 | 20 | `max_keepalive_connections` | 保持活跃的连接数 |
 | 连接过期时间 | 30秒 | `keepalive_expiry` | 空闲连接的过期时间 |
-| 并发健康检查 | 是 |
+| 并发健康检查 | 是 | - | 并发检查所有供应商健康状态 |
 
 ## 🛠️ 运维管理
 
@@ -376,6 +471,7 @@ curl -X POST http://localhost:8001/v1/reload
 - ✅ Token白名单
 - ✅ 支持的模型
 - ✅ 日志级别
+- ✅ 模型列表配置
 
 ### 监控指标
 
@@ -405,7 +501,7 @@ curl -X POST http://localhost:8001/v1/reload
 **解决方法**:
 1. 确认Token在 `config.json` 的 `tokens` 列表中
 2. 检查Token格式是否正确
-3. 确认请求头中包含 `Authorization: Bearer <token>`
+3. 确认请求头中包含 `Authorization: Bearer `
 
 ### 问题3: 模型不可用
 
@@ -415,6 +511,7 @@ curl -X POST http://localhost:8001/v1/reload
 1. 使用 `/v1/models` 查看可用模型列表
 2. 确认模型名称格式：`供应商/模型`
 3. 检查 `supported_models` 配置
+4. 如果使用手动指定模式，确认模型在 `model_list` 中
 
 ### 问题4: 日志过多
 
@@ -424,6 +521,18 @@ curl -X POST http://localhost:8001/v1/reload
 1. 调整日志级别为 `WARNING` 或 `ERROR`
 2. 配置日志轮转（logrotate）
 3. 定期清理旧日志
+
+### 问题5: 模型列表为空
+
+**症状**: `/v1/models` 返回空列表
+
+**解决方法**:
+1. 检查供应商的 `model_list` 配置
+   - 如果为空数组，确认供应商API可访问
+   - 如果手动指定，确认模型名称正确
+2. 查看日志中的错误信息
+3. 使用 `/health` 检查供应商状态
+4. 尝试手动指定模型列表
 
 ## 🔧 性能优化说明
 
@@ -497,57 +606,40 @@ curl -X POST http://localhost:8001/v1/reload
 }
 ```
 
-## 🔧 开发
+## 🔄 配置迁移指南
 
-### 项目结构
+### 从旧格式迁移到新格式
 
-```
-AI-Proxy/
-├── api.py                          # FastAPI应用主文件
-├── client.py                       # 供应商客户端和模型管理器
-├── config.py                       # 配置管理模块
-├── config.json                     # 配置文件
-├── config.json.example             # 配置示例
-├── requirements.txt                # Python依赖
-├── ai_proxy.log                    # 日志文件
-├── README.md                       # 本文件
-├── STREAM_ANALYSIS_REPORT.md       # 流式传输分析
-├── IMPROVEMENTS.md                 # 改进清单
-├── NON_STREAM_IMPROVEMENTS.md      # 非流式改进
-└── LOG_LEVEL_CONFIG.md             # 日志配置说明
+**旧格式**:
+```json
+{
+  "providers": [
+    "zhipu|https://open.bigmodel.cn/api/paas/v4|your-key",
+    "openai|https://api.openai.com/v1|sk-your-key"
+  ]
+}
 ```
 
-### 依赖项
-
-- `fastapi` - Web框架
-- `uvicorn` - ASGI服务器
-- `httpx` - 异步HTTP客户端
-- `pydantic` - 数据验证
-
-### 运行测试
-
-```bash
-# 安装测试依赖
-pip install pytest pytest-asyncio
-
-# 运行测试
-pytest
+**新格式**:
+```json
+{
+  "providers": [
+    {
+      "provider": "zhipu",
+      "baseurl": "https://open.bigmodel.cn/api/paas/v4",
+      "token": "your-key"
+    },
+    {
+      "provider": "openai",
+      "baseurl": "https://api.openai.com/v1",
+      "token": "sk-your-key"
+    }
+  ]
+}
 ```
 
-## 🤝 贡献
-
-欢迎提交Issue和Pull Request！
+**注意**: 程序同时支持新旧两种格式，可以混合使用。
 
 ## 📄 许可证
 
 MIT License
-
-## 📮 联系方式
-
-如有问题或建议，请提交Issue。
-
----
-
-**版本**: 2.0  
-**最后更新**: 2025-11-21  
-**状态**: ✅ 生产就绪

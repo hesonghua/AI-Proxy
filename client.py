@@ -51,8 +51,14 @@ class ProviderClient:
         self.provider = provider
         self.config = config
         self._models_cache: Optional[List[Dict[str, Any]]] = None  # 模型缓存
-        self._last_fetch_time: Optional[float] = None  # 上次获取时间
-        self._fetch_failed: bool = False  # 是否获取失败
+
+        if provider.model_list:
+            self._models_cache = [{
+                "id": f"{self.provider.name}/{p}",
+                "object": "model",
+                "created": 1748488196000,
+                "owned_by": self.provider.name
+            } for p in provider.model_list]
         
         # 检查URL是否已经包含完整的API路径
         if provider.url.endswith('/chat/completions'):
@@ -94,7 +100,7 @@ class ProviderClient:
                    f"chat_endpoint: {self.chat_endpoint}, "
                    f"stream_timeout: {stream_timeout}s, non_stream_timeout: {non_stream_timeout}s")
     
-    async def get_models(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+    async def get_models(self) -> List[Dict[str, Any]]:
         """获取供应商支持的模型列表
         
         Args:
@@ -103,37 +109,13 @@ class ProviderClient:
         Returns:
             模型列表
         """
-        import time
-        current_time = time.time()
-        
-        # 如果有缓存且不强制刷新
-        if not force_refresh and self._models_cache is not None:
-            # 如果之前获取失败，且距离上次尝试超过10秒，重新尝试
-            if self._fetch_failed and self._last_fetch_time:
-                time_since_last = current_time - self._last_fetch_time
-                if time_since_last > 10:
-                    logger.info(f"供应商 {self.provider.name} 上次获取失败，10秒后重试...")
-                    # 继续执行获取逻辑
-                else:
-                    # 返回缓存（可能为空）
-                    logger.debug(f"供应商 {self.provider.name} 使用缓存 (失败状态，等待重试)")
-                    return self._models_cache
-            else:
-                # 成功状态，直接返回缓存
-                logger.debug(f"供应商 {self.provider.name} 使用缓存的模型列表")
-                return self._models_cache
-        
-        # 执行获取逻辑（带重试）
-        models = await self._fetch_models_with_retry()
-        
-        # 更新缓存和状态
-        self._models_cache = models
-        self._last_fetch_time = current_time
-        self._fetch_failed = (len(models) == 0)
-        
-        return models
+
+        if self._models_cache is None:
+            self._models_cache = await self._fetch_models_with_retry()
+
+        return self._models_cache if self._models_cache is not None else []
     
-    async def _fetch_models_with_retry(self, max_retries: int = 3) -> List[Dict[str, Any]]:
+    async def _fetch_models_with_retry(self, max_retries: int = 3) -> Optional[List[Dict[str, Any]]]:
         """从供应商获取模型列表（带重试）
         
         Args:
@@ -195,7 +177,7 @@ class ProviderClient:
                         pass
         
         # 所有重试都失败，返回空列表
-        return []
+        return None
     
     async def chat_completion(self, body: Dict[str, Any]) -> Dict[str, Any]:
         """发送聊天完成请求 - 接受完整的请求体字典"""
@@ -359,7 +341,7 @@ class ModelManager:
         self.config = config
         logger.info(f"初始化模型管理器，供应商数量: {len(providers)}")
     
-    async def get_all_models(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+    async def get_all_models(self) -> List[Dict[str, Any]]:
         """获取所有供应商的模型列表
         
         Args:
@@ -375,7 +357,7 @@ class ModelManager:
         # 并发调用所有供应商的get_models
         # 每个ProviderClient会自己管理缓存和重试
         for client in self.clients.values():
-            tasks.append(client.get_models(force_refresh=force_refresh))
+            tasks.append(client.get_models())
         
         # 并发获取所有供应商的模型
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -480,8 +462,6 @@ class ModelManager:
         logger.info("清除所有供应商的模型缓存")
         for client in self.clients.values():
             client._models_cache = None
-            client._fetch_failed = False
-            client._last_fetch_time = None
     
     async def close_all(self):
         """关闭所有客户端连接"""

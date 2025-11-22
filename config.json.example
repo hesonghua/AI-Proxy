@@ -3,12 +3,31 @@
   "port": 8001,
   "log_level": "WARNING",
   "providers": [
-    "zhipu|https://open.bigmodel.cn/api/coding/paas/v4|your_key",
-    "dmxapi|https://www.dmxapi.cn/v1|your_key",
-    "aliyun|https://dashscope.aliyuncs.com/compatible-mode/v1|your_key"
+    {
+      "provider": "zhipu",
+      "baseurl": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "token": "your_zhipu_api_key"
+    },
+    {
+      "provider": "dmxapi",
+      "baseurl": "https://www.dmxapi.cn/v1",
+      "token": "your_dmxapi_key"
+    },
+    {
+      "provider": "aliyun",
+      "baseurl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "token": "your_aliyun_key"
+    },
+    {
+      "provider": "openai",
+      "baseurl": "https://api.openai.com/v1",
+      "token": "sk-your-openai-key",
+      "model_list": ["gpt-4", "gpt-3.5-turbo"]
+    }
   ],
   "tokens": [
-    "token1|xxxxxxxxxxx"
+    "token1|xxxxxxxxxxx",
+    "admin|sk-admin-token-here"
   ],
   "supported_models": [
     "deepseek.*3.*2",
@@ -16,7 +35,7 @@
     "glm-4.6",
     "sonnet.*4.*[\\.-]5",
     ".*4.*5.*sonnet",
-    "gpt-?5",
+    "gpt-?[45]",
     "gemini.*3"
   ],
   "max_connections": 100,
