@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Union
 import json
 import asyncio
-
+import os
 from config import Config
 from client import ModelManager
 
@@ -17,7 +17,10 @@ from client import ModelManager
 logger = logging.getLogger(__name__)
 
 # 全局配置和模型管理器
-config = Config()
+CONFIG_FILE=os.getenv("CONFIG_FILE", "config.json")
+if not os.path.exists(CONFIG_FILE):
+    CONFIG_FILE="config.default.json"
+config = Config(config_file=CONFIG_FILE)
 model_manager = ModelManager(config.providers, config)
 
 
