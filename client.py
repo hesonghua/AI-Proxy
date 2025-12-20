@@ -50,6 +50,7 @@ class ProviderClient:
     def __init__(self, provider: Provider, config=None):
         self.provider = provider
         self.config = config
+        self.health_check_retry = 3
         self._models_cache: Optional[List[Dict[str, Any]]] = None  # 模型缓存
 
         if provider.model_list:
@@ -320,7 +321,9 @@ class ProviderClient:
             logger.debug(f"检查供应商 {self.provider.name} 健康状态")
             # response = await self.client.get("/models")
             # is_healthy = response.status_code == 200
-
+            if self.health_check_retry > 0:
+                await self.get_models()
+                self.health_check_retry -= 1
             is_healthy = self._models_cache is not None and len(self._models_cache) > 0
             logger.debug(f"供应商 {self.provider.name} 健康状态: {'健康' if is_healthy else '异常'}")
             return is_healthy
