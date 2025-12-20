@@ -318,8 +318,10 @@ class ProviderClient:
         """健康检查"""
         try:
             logger.debug(f"检查供应商 {self.provider.name} 健康状态")
-            response = await self.client.get("/models")
-            is_healthy = response.status_code == 200
+            # response = await self.client.get("/models")
+            # is_healthy = response.status_code == 200
+
+            is_healthy = self._models_cache is not None and len(self._models_cache) > 0
             logger.debug(f"供应商 {self.provider.name} 健康状态: {'健康' if is_healthy else '异常'}")
             return is_healthy
         except Exception as e:
